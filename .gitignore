@@ -1,0 +1,15 @@
+/bin/
+/build/
+/dist/
+*.test
+*.out
+coverage.*
+.env
+.env.*
+!.env.example
+*.log
+tmp/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
