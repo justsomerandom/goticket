@@ -4,6 +4,8 @@ This document will describe GoTicket's API, worker, domain packages, storage bou
 
 GoTicket is a modular monolith.
 
+The initial core model lives in `internal/domain`. It contains transport- and persistence-neutral entities, strongly typed IDs, enum validation, domain errors, and small repository contracts for future application and storage code.
+
 Rules:
 - domain layer must not depend on HTTP or database code
 - repositories expose interfaces used by services

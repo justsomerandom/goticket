@@ -2,7 +2,7 @@
 
 GoTicket is planned as a production-oriented backend for ticket and support workflows, including multiple ingestion methods, asynchronous notifications, automation, SLA handling, outbound webhooks, and auditability.
 
-This repository currently contains only the initial project foundation. Ticketing behavior has not been implemented yet.
+This repository currently contains the initial project foundation and core domain model. Ticketing behavior outside the domain layer has not been implemented yet.
 
 ## Goals
 
@@ -48,7 +48,8 @@ flowchart LR
 
 - `cmd/api` - planned HTTP API entry point.
 - `cmd/worker` - planned background worker entry point.
-- `internal/ticket` - ticket domain behavior.
+- `internal/domain` - core ticket, user, organization, and comment entities plus repository contracts.
+- `internal/ticket` - planned ticket application behavior.
 - `internal/ingest` - inbound source handling.
 - `internal/webhook` - webhook signing, dispatch, and receipt concepts.
 - `internal/notification` - planned notification queue and delivery behavior.
@@ -77,7 +78,7 @@ Setup instructions will be expanded as implementation begins. No generated depen
 
 ## Roadmap
 
-- [ ] Define ticket, user, organization, and comment domain models.
+- [x] Define ticket, user, organization, and comment domain models.
 - [ ] Establish HTTP API routing and validation.
 - [ ] Add PostgreSQL migrations and storage interfaces.
 - [ ] Implement inbound webhook ingestion with idempotency.
