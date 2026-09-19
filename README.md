@@ -2,7 +2,7 @@
 
 GoTicket is planned as a production-oriented backend for ticket and support workflows, including multiple ingestion methods, asynchronous notifications, automation, SLA handling, outbound webhooks, and auditability.
 
-This repository currently contains only the initial project foundation. Ticketing behavior has not been implemented yet.
+This repository provides a deployable first ticketing backend: a REST API, PostgreSQL persistence, an audit trail, and a durable PostgreSQL-backed notification worker.
 
 ## Goals
 
@@ -69,11 +69,21 @@ flowchart LR
 - OpenTelemetry - planned observability.
 - REST API - planned public interface.
 
-Only the module and directory skeleton are currently present.
+The API uses Chi and pgx/pgxpool. PostgreSQL is also the job queue, so Redis is not required for this version.
 
 ## Development
 
-Setup instructions will be expanded as implementation begins. No generated dependencies, lockfiles, or framework boilerplate are present yet.
+Set `DATABASE_URL` and apply the migration before starting either process:
+
+```powershell
+psql $env:DATABASE_URL -f migrations/000001_initial.sql
+go run ./cmd/api
+go run ./cmd/worker
+```
+
+`HTTP_ADDR` defaults to `:8080`. The API exposes `GET /healthz` and `GET /readyz`.
+
+Ticket endpoints are under `/v1`: create organizations and users, create/list tickets, fetch a ticket, update assignment/status/priority, create/list comments, and list ticket audit events. All JSON errors include an error code, message, and request ID.
 
 ## Roadmap
 

@@ -1,0 +1,10 @@
+openapi: 3.0.3
+info: {title: GoTicket API, version: 0.1.0}
+paths:
+  /healthz: {get: {responses: {'200': {description: Healthy}}}}
+  /readyz: {get: {responses: {'200': {description: Ready}, '503': {description: Database unavailable}}}}
+  /v1/organizations:
+    post: {summary: Create organization, responses: {'201': {description: Created}, '400': {description: Validation error}}}
+  /v1/organizations/{organizationID}/tickets:
+    get: {summary: List or search tickets, responses: {'200': {description: Tickets}}}
+    post: {summary: Create ticket, responses: {'201': {description: Created}}}
