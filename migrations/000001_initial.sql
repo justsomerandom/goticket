@@ -1,0 +1,10 @@
+CREATE TABLE organizations (id uuid PRIMARY KEY, name text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE users (id uuid PRIMARY KEY, organization_id uuid NOT NULL REFERENCES organizations(id), email text NOT NULL, name text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(organization_id,email));
+CREATE TABLE tickets (id uuid PRIMARY KEY, organization_id uuid NOT NULL REFERENCES organizations(id), number bigserial NOT NULL UNIQUE, subject text NOT NULL, description text NOT NULL DEFAULT '', status text NOT NULL, priority text NOT NULL, assignee_id uuid REFERENCES users(id), created_by uuid NOT NULL REFERENCES users(id), created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+CREATE INDEX tickets_org_updated_idx ON tickets(organization_id,updated_at DESC);
+CREATE TABLE comments (id uuid PRIMARY KEY, ticket_id uuid NOT NULL REFERENCES tickets(id), author_id uuid NOT NULL REFERENCES users(id), body text NOT NULL, internal boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now());
+CREATE INDEX comments_ticket_created_idx ON comments(ticket_id,created_at);
+CREATE TABLE audit_events (id uuid PRIMARY KEY, ticket_id uuid NOT NULL REFERENCES tickets(id), actor_id uuid REFERENCES users(id), type text NOT NULL, data jsonb NOT NULL DEFAULT '{}', created_at timestamptz NOT NULL DEFAULT now());
+CREATE INDEX audit_events_ticket_created_idx ON audit_events(ticket_id,created_at);
+CREATE TABLE jobs (id uuid PRIMARY KEY, type text NOT NULL, payload jsonb NOT NULL, state text NOT NULL DEFAULT 'pending', attempts integer NOT NULL DEFAULT 0, max_attempts integer NOT NULL DEFAULT 5, next_attempt_at timestamptz NOT NULL DEFAULT now(), last_error text, locked_at timestamptz, completed_at timestamptz, created_at timestamptz NOT NULL DEFAULT now());
+CREATE INDEX jobs_ready_idx ON jobs(state,next_attempt_at) WHERE state='pending';
