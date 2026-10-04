@@ -27,7 +27,7 @@ func main() {
 	defer pool.Close()
 	c, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	w := jobs.Worker{Store: postgres.New(pool), Log: log, Handle: func(_ context.Context, j postgres.Job) error {
+	w := jobs.Worker{Store: postgres.NewWithJobLease(pool, cfg.JobLeaseDuration), Log: log, Handle: func(_ context.Context, j postgres.Job) error {
 		log.Info("notification delivered", "type", j.Type, "job_id", j.ID)
 		return nil
 	}}

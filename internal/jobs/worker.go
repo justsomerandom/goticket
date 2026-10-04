@@ -3,7 +3,6 @@ package jobs
 import (
 	"context"
 	"errors"
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"goticket/internal/storage/postgres"
 	"log/slog"
@@ -13,7 +12,7 @@ import (
 type Handler func(context.Context, postgres.Job) error
 type Store interface {
 	ClaimJob(context.Context) (postgres.Job, error)
-	CompleteJob(context.Context, uuid.UUID) error
+	CompleteJob(context.Context, postgres.Job) error
 	FailJob(context.Context, postgres.Job, error) error
 }
 type Worker struct {
@@ -51,5 +50,5 @@ func (w Worker) One(c context.Context) error {
 	if e = w.Handle(c, j); e != nil {
 		return w.Store.FailJob(c, j, e)
 	}
-	return w.Store.CompleteJob(c, j.ID)
+	return w.Store.CompleteJob(c, j)
 }

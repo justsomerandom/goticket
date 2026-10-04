@@ -16,9 +16,22 @@ import (
 	"time"
 )
 
-type Store struct{ pool *pgxpool.Pool }
+const defaultJobLease = 5 * time.Minute
 
-func New(pool *pgxpool.Pool) *Store           { return &Store{pool: pool} }
+var ErrJobLeaseLost = errors.New("job processing lease lost")
+
+type Store struct {
+	pool     *pgxpool.Pool
+	jobLease time.Duration
+}
+
+func New(pool *pgxpool.Pool) *Store { return NewWithJobLease(pool, defaultJobLease) }
+func NewWithJobLease(pool *pgxpool.Pool, lease time.Duration) *Store {
+	if lease <= 0 {
+		lease = defaultJobLease
+	}
+	return &Store{pool: pool, jobLease: lease}
+}
 func (s *Store) Close()                       { s.pool.Close() }
 func (s *Store) Ping(c context.Context) error { return s.pool.Ping(c) }
 func (s *Store) CreateOrganization(c context.Context, o organization.Organization) (organization.Organization, error) {
@@ -141,6 +154,7 @@ func (s *Store) ListAudit(c context.Context, id uuid.UUID, limit, offset int) ([
 
 type Job struct {
 	ID                    uuid.UUID
+	LockToken             uuid.UUID
 	Type                  string
 	Payload               map[string]any
 	Attempts, MaxAttempts int
@@ -149,16 +163,34 @@ type Job struct {
 func (s *Store) ClaimJob(c context.Context) (Job, error) {
 	var j Job
 	var p []byte
-	e := s.pool.QueryRow(c, `WITH next AS (SELECT id FROM jobs WHERE state='pending' AND next_attempt_at<=now() ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE jobs SET state='running',locked_at=now(),attempts=attempts+1 FROM next WHERE jobs.id=next.id RETURNING jobs.id,jobs.type,jobs.payload,jobs.attempts,jobs.max_attempts`).Scan(&j.ID, &j.Type, &p, &j.Attempts, &j.MaxAttempts)
+	tx, e := s.pool.Begin(c)
 	if e != nil {
 		return j, e
 	}
-	e = json.Unmarshal(p, &j.Payload)
-	return j, e
+	defer tx.Rollback(c)
+	lease := fmt.Sprintf("%f seconds", s.jobLease.Seconds())
+	if _, e = tx.Exec(c, `UPDATE jobs SET state=CASE WHEN attempts>=max_attempts THEN 'dead' ELSE 'pending' END, locked_at=NULL, lock_token=NULL, next_attempt_at=now(), last_error='processing lease expired' WHERE state='running' AND locked_at < now()-$1::interval`, lease); e != nil {
+		return j, e
+	}
+	j.LockToken = uuid.New()
+	e = tx.QueryRow(c, `WITH next AS (SELECT id FROM jobs WHERE state='pending' AND next_attempt_at<=now() ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE jobs SET state='running',locked_at=now(),lock_token=$1,attempts=attempts+1 FROM next WHERE jobs.id=next.id RETURNING jobs.id,jobs.type,jobs.payload,jobs.attempts,jobs.max_attempts`, j.LockToken).Scan(&j.ID, &j.Type, &p, &j.Attempts, &j.MaxAttempts)
+	if e != nil {
+		return j, e
+	}
+	if e = json.Unmarshal(p, &j.Payload); e != nil {
+		return j, e
+	}
+	return j, tx.Commit(c)
 }
-func (s *Store) CompleteJob(c context.Context, id uuid.UUID) error {
-	_, e := s.pool.Exec(c, `UPDATE jobs SET state='completed',completed_at=now(),locked_at=NULL WHERE id=$1`, id)
-	return e
+func (s *Store) CompleteJob(c context.Context, j Job) error {
+	tag, e := s.pool.Exec(c, `UPDATE jobs SET state='completed',completed_at=now(),locked_at=NULL,lock_token=NULL WHERE id=$1 AND state='running' AND lock_token=$2`, j.ID, j.LockToken)
+	if e != nil {
+		return e
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrJobLeaseLost
+	}
+	return nil
 }
 func (s *Store) FailJob(c context.Context, j Job, cause error) error {
 	state := "pending"
@@ -166,8 +198,14 @@ func (s *Store) FailJob(c context.Context, j Job, cause error) error {
 		state = "dead"
 	}
 	delay := time.Duration(1<<min(j.Attempts, 8)) * time.Second
-	_, e := s.pool.Exec(c, `UPDATE jobs SET state=$2,last_error=$3,locked_at=NULL,next_attempt_at=now()+$4::interval WHERE id=$1`, j.ID, state, cause.Error(), fmt.Sprintf("%f seconds", delay.Seconds()))
-	return e
+	tag, e := s.pool.Exec(c, `UPDATE jobs SET state=$2,last_error=$3,locked_at=NULL,lock_token=NULL,next_attempt_at=now()+$4::interval WHERE id=$1 AND state='running' AND lock_token=$5`, j.ID, state, cause.Error(), fmt.Sprintf("%f seconds", delay.Seconds()), j.LockToken)
+	if e != nil {
+		return e
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrJobLeaseLost
+	}
+	return nil
 }
 func (s *Store) withTx(c context.Context, fn func(pgx.Tx) error) error {
 	tx, e := s.pool.Begin(c)
