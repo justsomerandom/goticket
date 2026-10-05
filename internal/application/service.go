@@ -10,14 +10,24 @@ import (
 	"goticket/internal/user"
 )
 
-var ErrNotFound = errors.New("not found")
+var (
+	ErrNotFound            = errors.New("not found")
+	ErrIdempotencyConflict = errors.New("idempotency key was reused with a different request")
+)
+
+// Idempotency identifies a retryable create request. RequestHash must represent
+// the normalized request payload for the supplied key.
+type Idempotency struct {
+	Key         string
+	RequestHash []byte
+}
 
 type Store interface {
 	CreateOrganization(context.Context, organization.Organization) (organization.Organization, error)
 	CreateUser(context.Context, user.User) (user.User, error)
-	CreateTicket(context.Context, ticket.Ticket, ticket.AuditEvent, Job) (ticket.Ticket, error)
+	CreateTicket(context.Context, ticket.Ticket, ticket.AuditEvent, Job, Idempotency) (ticket.Ticket, error)
 	UpdateTicket(context.Context, ticket.Ticket, ticket.AuditEvent) (ticket.Ticket, error)
-	AddComment(context.Context, ticket.Comment, ticket.AuditEvent, Job) (ticket.Comment, error)
+	AddComment(context.Context, ticket.Comment, ticket.AuditEvent, Job, Idempotency) (ticket.Comment, error)
 	GetTicket(context.Context, uuid.UUID) (ticket.Ticket, error)
 	ListTickets(context.Context, ticket.ListFilter) ([]ticket.Ticket, error)
 	ListComments(context.Context, uuid.UUID) ([]ticket.Comment, error)
@@ -46,12 +56,15 @@ func (s *Service) CreateUser(c context.Context, orgID uuid.UUID, email, name str
 	return s.store.CreateUser(c, user.User{ID: s.newID(), OrganizationID: orgID, Email: email, Name: name})
 }
 func (s *Service) CreateTicket(c context.Context, orgID, actor uuid.UUID, subject, description string, priority ticket.Priority) (ticket.Ticket, error) {
+	return s.CreateTicketIdempotent(c, orgID, actor, subject, description, priority, Idempotency{})
+}
+func (s *Service) CreateTicketIdempotent(c context.Context, orgID, actor uuid.UUID, subject, description string, priority ticket.Priority, key Idempotency) (ticket.Ticket, error) {
 	t := ticket.Ticket{ID: s.newID(), OrganizationID: orgID, CreatedBy: actor, Subject: subject, Description: description, Status: ticket.StatusOpen, Priority: priority}
 	if orgID == uuid.Nil || actor == uuid.Nil || ticket.ValidateCreate(subject, t.Status, priority) != nil {
 		return t, ticket.ErrInvalid
 	}
 	e := event(s.newID(), t.ID, actor, "created", map[string]any{"status": t.Status, "priority": t.Priority})
-	return s.store.CreateTicket(c, t, e, Job{Type: "ticket.created", Payload: map[string]any{"ticket_id": t.ID.String()}})
+	return s.store.CreateTicket(c, t, e, Job{Type: "ticket.created", Payload: map[string]any{"ticket_id": t.ID.String()}}, key)
 }
 func (s *Service) Assign(c context.Context, id, actor uuid.UUID, assignee *uuid.UUID) (ticket.Ticket, error) {
 	t, e := s.store.GetTicket(c, id)
@@ -86,11 +99,14 @@ func (s *Service) SetPriority(c context.Context, id, actor uuid.UUID, p ticket.P
 	return s.store.UpdateTicket(c, t, event(s.newID(), id, actor, "priority_changed", map[string]any{"from": old, "to": p}))
 }
 func (s *Service) AddComment(c context.Context, id, actor uuid.UUID, body string, internal bool) (ticket.Comment, error) {
+	return s.AddCommentIdempotent(c, id, actor, body, internal, Idempotency{})
+}
+func (s *Service) AddCommentIdempotent(c context.Context, id, actor uuid.UUID, body string, internal bool, key Idempotency) (ticket.Comment, error) {
 	if ticket.ValidateComment(body) != nil {
 		return ticket.Comment{}, ticket.ErrInvalid
 	}
 	cm := ticket.Comment{ID: s.newID(), TicketID: id, AuthorID: actor, Body: body, Internal: internal}
-	return s.store.AddComment(c, cm, event(s.newID(), id, actor, "comment_added", map[string]any{"internal": internal}), Job{Type: "ticket.comment_added", Payload: map[string]any{"ticket_id": id.String()}})
+	return s.store.AddComment(c, cm, event(s.newID(), id, actor, "comment_added", map[string]any{"internal": internal}), Job{Type: "ticket.comment_added", Payload: map[string]any{"ticket_id": id.String()}}, key)
 }
 func (s *Service) GetTicket(c context.Context, id uuid.UUID) (ticket.Ticket, error) {
 	return s.store.GetTicket(c, id)

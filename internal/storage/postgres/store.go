@@ -2,6 +2,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -42,10 +43,14 @@ func (s *Store) CreateUser(c context.Context, u user.User) (user.User, error) {
 	e := s.pool.QueryRow(c, `INSERT INTO users(id,organization_id,email,name) VALUES($1,$2,$3,$4) RETURNING created_at`, u.ID, u.OrganizationID, u.Email, u.Name).Scan(&u.CreatedAt)
 	return u, translate(e)
 }
-func (s *Store) CreateTicket(c context.Context, t ticket.Ticket, a ticket.AuditEvent, j application.Job) (ticket.Ticket, error) {
+func (s *Store) CreateTicket(c context.Context, t ticket.Ticket, a ticket.AuditEvent, j application.Job, key application.Idempotency) (ticket.Ticket, error) {
 	e := s.withTx(c, func(tx pgx.Tx) error {
-		if e := tx.QueryRow(c, `INSERT INTO tickets(id,organization_id,subject,description,status,priority,created_by) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING number,created_at,updated_at`, t.ID, t.OrganizationID, t.Subject, t.Description, t.Status, t.Priority, t.CreatedBy).Scan(&t.Number, &t.CreatedAt, &t.UpdatedAt); e != nil {
+		created, e := insertTicket(c, tx, &t, key)
+		if e != nil {
 			return e
+		}
+		if !created {
+			return nil
 		}
 		return insertEffects(c, tx, a, j)
 	})
@@ -67,14 +72,64 @@ func (s *Store) UpdateTicket(c context.Context, t ticket.Ticket, a ticket.AuditE
 	})
 	return t, translate(e)
 }
-func (s *Store) AddComment(c context.Context, cm ticket.Comment, a ticket.AuditEvent, j application.Job) (ticket.Comment, error) {
+func (s *Store) AddComment(c context.Context, cm ticket.Comment, a ticket.AuditEvent, j application.Job, key application.Idempotency) (ticket.Comment, error) {
 	e := s.withTx(c, func(tx pgx.Tx) error {
-		if e := tx.QueryRow(c, `INSERT INTO comments(id,ticket_id,author_id,body,internal) VALUES($1,$2,$3,$4,$5) RETURNING created_at`, cm.ID, cm.TicketID, cm.AuthorID, cm.Body, cm.Internal).Scan(&cm.CreatedAt); e != nil {
+		created, e := insertComment(c, tx, &cm, key)
+		if e != nil {
 			return e
+		}
+		if !created {
+			return nil
 		}
 		return insertEffects(c, tx, a, j)
 	})
 	return cm, translate(e)
+}
+
+func insertTicket(c context.Context, tx pgx.Tx, t *ticket.Ticket, key application.Idempotency) (bool, error) {
+	if key.Key == "" {
+		e := tx.QueryRow(c, `INSERT INTO tickets(id,organization_id,subject,description,status,priority,created_by) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING number,created_at,updated_at`, t.ID, t.OrganizationID, t.Subject, t.Description, t.Status, t.Priority, t.CreatedBy).Scan(&t.Number, &t.CreatedAt, &t.UpdatedAt)
+		return e == nil, e
+	}
+	e := tx.QueryRow(c, `INSERT INTO tickets(id,organization_id,subject,description,status,priority,created_by,idempotency_key,idempotency_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (organization_id,idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING number,created_at,updated_at`, t.ID, t.OrganizationID, t.Subject, t.Description, t.Status, t.Priority, t.CreatedBy, key.Key, key.RequestHash).Scan(&t.Number, &t.CreatedAt, &t.UpdatedAt)
+	if e == nil {
+		return true, nil
+	}
+	if !errors.Is(e, pgx.ErrNoRows) {
+		return false, e
+	}
+	var storedHash []byte
+	e = tx.QueryRow(c, `SELECT id,organization_id,number,subject,description,status,priority,assignee_id,created_by,created_at,updated_at,idempotency_hash FROM tickets WHERE organization_id=$1 AND idempotency_key=$2`, t.OrganizationID, key.Key).Scan(&t.ID, &t.OrganizationID, &t.Number, &t.Subject, &t.Description, &t.Status, &t.Priority, &t.AssigneeID, &t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &storedHash)
+	if e != nil {
+		return false, e
+	}
+	if !bytes.Equal(storedHash, key.RequestHash) {
+		return false, application.ErrIdempotencyConflict
+	}
+	return false, nil
+}
+
+func insertComment(c context.Context, tx pgx.Tx, cm *ticket.Comment, key application.Idempotency) (bool, error) {
+	if key.Key == "" {
+		e := tx.QueryRow(c, `INSERT INTO comments(id,ticket_id,author_id,body,internal) VALUES($1,$2,$3,$4,$5) RETURNING created_at`, cm.ID, cm.TicketID, cm.AuthorID, cm.Body, cm.Internal).Scan(&cm.CreatedAt)
+		return e == nil, e
+	}
+	e := tx.QueryRow(c, `INSERT INTO comments(id,ticket_id,author_id,body,internal,idempotency_key,idempotency_hash) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (ticket_id,idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING created_at`, cm.ID, cm.TicketID, cm.AuthorID, cm.Body, cm.Internal, key.Key, key.RequestHash).Scan(&cm.CreatedAt)
+	if e == nil {
+		return true, nil
+	}
+	if !errors.Is(e, pgx.ErrNoRows) {
+		return false, e
+	}
+	var storedHash []byte
+	e = tx.QueryRow(c, `SELECT id,ticket_id,author_id,body,internal,created_at,idempotency_hash FROM comments WHERE ticket_id=$1 AND idempotency_key=$2`, cm.TicketID, key.Key).Scan(&cm.ID, &cm.TicketID, &cm.AuthorID, &cm.Body, &cm.Internal, &cm.CreatedAt, &storedHash)
+	if e != nil {
+		return false, e
+	}
+	if !bytes.Equal(storedHash, key.RequestHash) {
+		return false, application.ErrIdempotencyConflict
+	}
+	return false, nil
 }
 func insertEffects(c context.Context, tx pgx.Tx, a ticket.AuditEvent, j application.Job) error {
 	data, e := json.Marshal(a.Data)
